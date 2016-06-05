@@ -83,7 +83,7 @@ func (g *CGroup) gatherDir(dir string, acc telegraf.Accumulator) error {
 
 	tags := map[string]string{"path": dir}
 
-	if g.FlushScope == 0 {
+	if g.FlushScope <= 0 {
 		acc.AddFields(metricName, fields, tags)
 		return nil
 	}
@@ -95,6 +95,7 @@ func (g *CGroup) gatherDir(dir string, acc telegraf.Accumulator) error {
 func writeWithBatches(acc telegraf.Accumulator, fields map[string]interface{}, tags map[string]string, scope int) {
 	for len(fields) > 0 {
 		batch := make(map[string]interface{})
+
 		for k, v := range fields {
 			batch[k] = v
 			delete(fields, k)
@@ -102,6 +103,7 @@ func writeWithBatches(acc telegraf.Accumulator, fields map[string]interface{}, t
 				break
 			}
 		}
+
 		acc.AddFields(metricName, batch, tags)
 	}
 }
