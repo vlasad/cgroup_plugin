@@ -10,49 +10,26 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
-	"strings"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/inputs"
 )
 
-type Rule struct {
-	Prefix string
-	Paths  []string
-	Fields []string
-}
+const metricName = "cgroup"
 
 type CGroup struct {
-	Prefix string
-	Rules  []Rule
+	Paths      []string `toml:"paths"`
+	Files      []string `toml:"fields"`
+	FlushScope int      `toml:"flush_scope"`
 }
 
 var sampleConfig = `
-	## To don't duplicate full path, you can define prefix.
-	## This optional prefix is global for all rules.
-	# prefix = "/cgroup/"
-
-	## If global prefix is not defined, it is necessary to specify full path to cgroup. For example:
-	# [[inputs.cgroup.rules]]
-	#   paths = [
-	#     "/cgroup/memory",           # root cgroup
-	#     "/cgroup/memory/child1",    # container cgroup
-	#     "/cgroup/memory/child2/*",  # all children cgroups under child2, but not child2 itself
-	#   ]
-	#   fields = ["memory.max_usage_in_bytes", "memory.limit_in_bytes"]
-
-	## If prefix is defined, it is necessary to specify only relative path to cgroup. For example:
-	# [[inputs.cgroup.rules]]
-	#   ## Also It's possible to define prefix per rule. Instead of global prefix, this one will be used for the rule.
-	#   prefix = "/cgroup/cpu/"   # optional
-	#   paths = [
-	#     "/",                    # root cgroup
-	#     "child1",               # container cgroup
-	#     "*",                    # all container cgroups
-	#     "child2/*",             # all children cgroups under child2, but not child2 itself
-	#     "*/*",                  # all children cgroups under each container cgroup
-	#   ]
-	#   fields = ["cpuacct.usage", "cpu.cfs_period_us", "cpu.cfs_quota_us"]
+	# paths = [
+	#   "/cgroup/memory",
+	#   "/cgroup/memory/child1",
+	#   "/cgroup/memory/child2/*",
+	# ]
+	# fields = ["memory.*usage*", "memory.limit_in_bytes"]
 `
 
 func (g *CGroup) SampleConfig() string {
@@ -64,60 +41,14 @@ func (g *CGroup) Description() string {
 }
 
 func (g *CGroup) Gather(acc telegraf.Accumulator) error {
-	if err := g.normalize(); err != nil {
-		return err
-	}
-
-	for _, r := range g.Rules {
-		if err := r.gather(acc); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (g *CGroup) normalize() error {
-	g.Prefix = strings.TrimSpace(g.Prefix)
-
-	for i, r := range g.Rules {
-		g.Rules[i].Prefix = strings.TrimSpace(g.Rules[i].Prefix)
-		if g.Rules[i].Prefix == "" {
-			g.Rules[i].Prefix = g.Prefix
-		}
-
-		pathsCount := 0
-		for j := range r.Paths {
-			if strings.TrimSpace(r.Paths[j]) != "" {
-				pathsCount++
-			}
-		}
-		if pathsCount == 0 {
-			return fmt.Errorf("rule #%d has not any path", i)
-		}
-
-		fieldsCount := 0
-		for j := range r.Fields {
-			if strings.TrimSpace(r.Fields[j]) != "" {
-				fieldsCount++
-			}
-		}
-		if fieldsCount == 0 {
-			return fmt.Errorf("rule #%d has not any field", i)
-		}
-	}
-
-	return nil
-}
-
-func (r *Rule) gather(acc telegraf.Accumulator) error {
-	list := make(chan dirInfo)
-	go r.generateDirs(list)
+	list := make(chan pathInfo)
+	go g.generateDirs(list)
 
 	for dir := range list {
 		if dir.err != nil {
 			return dir.err
 		}
-		if err := r.gatherDir(dir.path, acc); err != nil {
+		if err := g.gatherDir(dir.path, acc); err != nil {
 			return err
 		}
 	}
@@ -125,53 +56,18 @@ func (r *Rule) gather(acc telegraf.Accumulator) error {
 	return nil
 }
 
-type dirInfo struct {
-	path string
-	err  error
-}
+func (g *CGroup) gatherDir(dir string, acc telegraf.Accumulator) error {
+	fields := make(map[string]interface{})
 
-func isDir(path string) (bool, error) {
-	fileInfo, err := os.Stat(path)
-	if err != nil {
-		return false, err
-	}
-	return fileInfo.IsDir(), nil
-}
+	list := make(chan pathInfo)
+	go g.generateFiles(dir, list)
 
-func (r *Rule) generateDirs(list chan<- dirInfo) {
-	for _, dir := range r.Paths {
-		dir = path.Clean(path.Join(r.Prefix, dir))
-
-		items, err := filepath.Glob(dir)
-		if err != nil {
-			list <- dirInfo{err: err}
-			return
+	for file := range list {
+		if file.err != nil {
+			return file.err
 		}
 
-		for _, item := range items {
-			ok, err := isDir(item)
-			if err != nil {
-				list <- dirInfo{err: err}
-				return
-			}
-			if ok {
-				list <- dirInfo{path: item}
-			}
-		}
-	}
-	close(list)
-}
-
-func (r *Rule) measurement() string {
-	return strings.Split(r.Fields[0], ".")[0]
-}
-
-func (r *Rule) gatherDir(dir string, acc telegraf.Accumulator) error {
-	singleValues := make(map[string]interface{})
-
-	for _, file := range r.Fields {
-		filePath := path.Join(dir, file)
-		raw, err := ioutil.ReadFile(filePath)
+		raw, err := ioutil.ReadFile(file.path)
 		if err != nil {
 			return err
 		}
@@ -179,54 +75,130 @@ func (r *Rule) gatherDir(dir string, acc telegraf.Accumulator) error {
 			continue
 		}
 
-		fi := fileInfo{data: raw, path: filePath}
-		fields, tags, err := fi.parse()
-		if err != nil {
+		fd := fileData{data: raw, path: file.path}
+		if err := fd.parse(fields); err != nil {
 			return err
-		}
-
-		if len(fields) == 1 {
-			singleValues[file] = fields["value"]
-		} else {
-			tags["path"] = filePath
-			acc.AddFields("cgroup:"+file, fields, tags)
 		}
 	}
 
-	acc.AddFields("cgroup:"+r.measurement(), singleValues, map[string]string{"path": dir})
+	tags := map[string]string{"path": dir}
+
+	if g.FlushScope == 0 {
+		acc.AddFields(metricName, fields, tags)
+		return nil
+	}
+	writeWithBatches(acc, fields, tags, g.FlushScope)
 
 	return nil
 }
 
+func writeWithBatches(acc telegraf.Accumulator, fields map[string]interface{}, tags map[string]string, scope int) {
+	for len(fields) > 0 {
+		batch := make(map[string]interface{})
+		for k, v := range fields {
+			batch[k] = v
+			delete(fields, k)
+			if len(batch) == scope || len(fields) == 0 {
+				break
+			}
+		}
+		acc.AddFields(metricName, batch, tags)
+	}
+}
+
 // ======================================================================
 
-type fileInfo struct {
+type pathInfo struct {
+	path string
+	err  error
+}
+
+func isDir(path string) (bool, error) {
+	result, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	return result.IsDir(), nil
+}
+
+func (g *CGroup) generateDirs(list chan<- pathInfo) {
+	for _, dir := range g.Paths {
+		// getting all dirs that match the pattern 'dir'
+		items, err := filepath.Glob(dir)
+		if err != nil {
+			list <- pathInfo{err: err}
+			return
+		}
+
+		for _, item := range items {
+			ok, err := isDir(item)
+			if err != nil {
+				list <- pathInfo{err: err}
+				return
+			}
+			// supply only dirs
+			if ok {
+				list <- pathInfo{path: item}
+			}
+		}
+	}
+	close(list)
+}
+
+func (g *CGroup) generateFiles(dir string, list chan<- pathInfo) {
+	for _, file := range g.Files {
+		// getting all file paths that match the pattern 'dir + file'
+		// path.Base make sure that file variable does not contains part of path
+		items, err := filepath.Glob(path.Join(dir, path.Base(file)))
+		if err != nil {
+			list <- pathInfo{err: err}
+			return
+		}
+
+		for _, item := range items {
+			ok, err := isDir(item)
+			if err != nil {
+				list <- pathInfo{err: err}
+				return
+			}
+			// supply only files not dirs
+			if !ok {
+				list <- pathInfo{path: item}
+			}
+		}
+	}
+	close(list)
+}
+
+// ======================================================================
+
+type fileData struct {
 	data []byte
 	path string
 }
 
-func (d *fileInfo) format() (*fileFormat, error) {
-	for _, f := range fileFormats {
-		ok, err := f.match(d.data)
+func (fd *fileData) format() (*fileFormat, error) {
+	for _, ff := range fileFormats {
+		ok, err := ff.match(fd.data)
 		if err != nil {
 			return nil, err
 		}
 		if ok {
-			return &f, nil
+			return &ff, nil
 		}
 	}
 
-	return nil, fmt.Errorf("%v: unknown file format", d.path)
+	return nil, fmt.Errorf("%v: unknown file format", fd.path)
 }
 
-func (d *fileInfo) parse() (map[string]interface{}, map[string]string, error) {
-	format, err := d.format()
+func (fd *fileData) parse(fields map[string]interface{}) error {
+	format, err := fd.format()
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 
-	f, t := format.parser(d.data)
-	return f, t, nil
+	format.parser(filepath.Base(fd.path), fields, fd.data)
+	return nil
 }
 
 // ======================================================================
@@ -234,7 +206,7 @@ func (d *fileInfo) parse() (map[string]interface{}, map[string]string, error) {
 type fileFormat struct {
 	name    string
 	pattern string
-	parser  func(b []byte) (map[string]interface{}, map[string]string)
+	parser  func(measurement string, fields map[string]interface{}, b []byte)
 }
 
 const keyPattern = "[[:alpha:]_]+"
@@ -245,12 +217,11 @@ var fileFormats = [...]fileFormat{
 	fileFormat{
 		name:    "Single value",
 		pattern: "^" + valuePattern + "\n$",
-		parser: createParser(
-			"^("+valuePattern+")\n$",
-			func(matches [][]string, fields map[string]interface{}, tags map[string]string) {
-				fields["value"] = numberOrString(matches[0][1])
-			},
-		),
+		parser: func(measurement string, fields map[string]interface{}, b []byte) {
+			re := regexp.MustCompile("^(" + valuePattern + ")\n$")
+			matches := re.FindAllStringSubmatch(string(b), -1)
+			fields[measurement] = numberOrString(matches[0][1])
+		},
 	},
 	// 	VAL0\n
 	// 	VAL1\n
@@ -258,27 +229,25 @@ var fileFormats = [...]fileFormat{
 	fileFormat{
 		name:    "New line separated values",
 		pattern: "^(" + valuePattern + "\n){2,}$",
-		parser: createParser(
-			"("+valuePattern+")\n",
-			func(matches [][]string, fields map[string]interface{}, tags map[string]string) {
-				for i, v := range matches {
-					fields["value_"+strconv.Itoa(i)] = numberOrString(v[1])
-				}
-			},
-		),
+		parser: func(measurement string, fields map[string]interface{}, b []byte) {
+			re := regexp.MustCompile("(" + valuePattern + ")\n")
+			matches := re.FindAllStringSubmatch(string(b), -1)
+			for i, v := range matches {
+				fields[measurement+"."+strconv.Itoa(i)] = numberOrString(v[1])
+			}
+		},
 	},
 	// 	VAL0 VAL1 ...\n
 	fileFormat{
 		name:    "Space separated values",
 		pattern: "^(" + valuePattern + " )+\n$",
-		parser: createParser(
-			"("+valuePattern+") ",
-			func(matches [][]string, fields map[string]interface{}, tags map[string]string) {
-				for i, v := range matches {
-					fields["value_"+strconv.Itoa(i)] = numberOrString(v[1])
-				}
-			},
-		),
+		parser: func(measurement string, fields map[string]interface{}, b []byte) {
+			re := regexp.MustCompile("(" + valuePattern + ") ")
+			matches := re.FindAllStringSubmatch(string(b), -1)
+			for i, v := range matches {
+				fields[measurement+"."+strconv.Itoa(i)] = numberOrString(v[1])
+			}
+		},
 	},
 	// 	KEY0 VAL0\n
 	// 	KEY1 VAL1\n
@@ -286,14 +255,13 @@ var fileFormats = [...]fileFormat{
 	fileFormat{
 		name:    "New line separated key-space-value's",
 		pattern: "^(" + keyPattern + " " + valuePattern + "\n)+$",
-		parser: createParser(
-			"("+keyPattern+") ("+valuePattern+")\n",
-			func(matches [][]string, fields map[string]interface{}, tags map[string]string) {
-				for _, v := range matches {
-					fields[v[1]] = numberOrString(v[2])
-				}
-			},
-		),
+		parser: func(measurement string, fields map[string]interface{}, b []byte) {
+			re := regexp.MustCompile("(" + keyPattern + ") (" + valuePattern + ")\n")
+			matches := re.FindAllStringSubmatch(string(b), -1)
+			for _, v := range matches {
+				fields[measurement+"."+v[1]] = numberOrString(v[2])
+			}
+		},
 	},
 }
 
@@ -315,22 +283,6 @@ func (f fileFormat) match(b []byte) (bool, error) {
 		return true, nil
 	}
 	return false, nil
-}
-
-func createParser(
-	itemPattern string,
-	fn func(m [][]string, f map[string]interface{}, t map[string]string),
-) func(b []byte) (map[string]interface{}, map[string]string) {
-	return func(b []byte) (map[string]interface{}, map[string]string) {
-		re := regexp.MustCompile(itemPattern)
-		matches := re.FindAllStringSubmatch(string(b), -1)
-		fields := make(map[string]interface{})
-		tags := make(map[string]string)
-
-		fn(matches, fields, tags)
-
-		return fields, tags
-	}
 }
 
 func init() {

@@ -10,17 +10,14 @@ import (
 )
 
 var cg1 = &CGroup{
-	Rules: []Rule{
-		Rule{
-			Prefix: "testdata/memory",
-			Paths:  []string{"/"},
-			Fields: []string{"memory.empty", "memory.max_usage_in_bytes", "memory.limit_in_bytes", "memory.stat", "memory.use_hierarchy"},
-		},
-		Rule{
-			Prefix: "testdata/cpu",
-			Paths:  []string{"/"},
-			Fields: []string{"cpuacct.usage_percpu"},
-		},
+	Paths: []string{"testdata/memory"},
+	Files: []string{
+		"memory.empty",
+		"memory.max_usage_in_bytes",
+		"memory.limit_in_bytes",
+		"memory.stat",
+		"memory.use_hierarchy",
+		"notify_on_release",
 	},
 }
 
@@ -31,56 +28,29 @@ func TestCgroupStatistics_1(t *testing.T) {
 	require.NoError(t, err)
 
 	tags := map[string]string{
-		"path": "testdata/memory/memory.stat",
-	}
-	fields := map[string]interface{}{
-		"cache":       1739362304123123123,
-		"rss":         1775325184,
-		"rss_huge":    778043392,
-		"mapped_file": 421036032,
-		"dirty":       -307200,
-	}
-	acc.AssertContainsTaggedFields(t, "cgroup:memory.stat", fields, tags)
-
-	tags = map[string]string{
-		"path": "testdata/cpu/cpuacct.usage_percpu",
-	}
-	fields = map[string]interface{}{
-		"value_0": -1452543795404,
-		"value_1": 1376681271659,
-		"value_2": 1450950799997,
-		"value_3": -1473113374257,
-	}
-	acc.AssertContainsTaggedFields(t, "cgroup:cpuacct.usage_percpu", fields, tags)
-
-	tags = map[string]string{
-		"path": "testdata/memory/memory.max_usage_in_bytes",
-	}
-	fields = map[string]interface{}{
-		"value_0": 0,
-		"value_1": -1,
-		"value_2": 2,
-	}
-	acc.AssertContainsTaggedFields(t, "cgroup:memory.max_usage_in_bytes", fields, tags)
-
-	tags = map[string]string{
 		"path": "testdata/memory",
 	}
-	fields = map[string]interface{}{
-		"memory.limit_in_bytes": 223372036854771712,
-		"memory.use_hierarchy":  "12-781",
+	fields := map[string]interface{}{
+		"memory.stat.cache":           1739362304123123123,
+		"memory.stat.rss":             1775325184,
+		"memory.stat.rss_huge":        778043392,
+		"memory.stat.mapped_file":     421036032,
+		"memory.stat.dirty":           -307200,
+		"memory.max_usage_in_bytes.0": 0,
+		"memory.max_usage_in_bytes.1": -1,
+		"memory.max_usage_in_bytes.2": 2,
+		"memory.limit_in_bytes":       223372036854771712,
+		"memory.use_hierarchy":        "12-781",
+		"notify_on_release":           0,
 	}
-	acc.AssertContainsTaggedFields(t, "cgroup:memory", fields, tags)
+	acc.AssertContainsTaggedFields(t, "cgroup", fields, tags)
 }
 
+// ======================================================================
+
 var cg2 = &CGroup{
-	Rules: []Rule{
-		Rule{
-			Prefix: "testdata/memory",
-			Paths:  []string{"*"},
-			Fields: []string{"memory.limit_in_bytes"},
-		},
-	},
+	Paths: []string{"testdata/cpu"},
+	Files: []string{"cpuacct.usage_percpu"},
 }
 
 func TestCgroupStatistics_2(t *testing.T) {
@@ -90,27 +60,22 @@ func TestCgroupStatistics_2(t *testing.T) {
 	require.NoError(t, err)
 
 	tags := map[string]string{
-		"path": "testdata/memory/group_1",
+		"path": "testdata/cpu",
 	}
 	fields := map[string]interface{}{
-		"memory.limit_in_bytes": 223372036854771712,
+		"cpuacct.usage_percpu.0": -1452543795404,
+		"cpuacct.usage_percpu.1": 1376681271659,
+		"cpuacct.usage_percpu.2": 1450950799997,
+		"cpuacct.usage_percpu.3": -1473113374257,
 	}
-	acc.AssertContainsTaggedFields(t, "cgroup:memory", fields, tags)
-
-	tags = map[string]string{
-		"path": "testdata/memory/group_2",
-	}
-	acc.AssertContainsTaggedFields(t, "cgroup:memory", fields, tags)
+	acc.AssertContainsTaggedFields(t, "cgroup", fields, tags)
 }
 
+// ======================================================================
+
 var cg3 = &CGroup{
-	Rules: []Rule{
-		Rule{
-			Prefix: "testdata/memory",
-			Paths:  []string{"*/*", "group_2"},
-			Fields: []string{"memory.limit_in_bytes"},
-		},
-	},
+	Paths: []string{"testdata/memory/*"},
+	Files: []string{"memory.limit_in_bytes"},
 }
 
 func TestCgroupStatistics_3(t *testing.T) {
@@ -120,20 +85,98 @@ func TestCgroupStatistics_3(t *testing.T) {
 	require.NoError(t, err)
 
 	tags := map[string]string{
+		"path": "testdata/memory/group_1",
+	}
+	fields := map[string]interface{}{
+		"memory.limit_in_bytes": 223372036854771712,
+	}
+	acc.AssertContainsTaggedFields(t, "cgroup", fields, tags)
+
+	tags = map[string]string{
+		"path": "testdata/memory/group_2",
+	}
+	acc.AssertContainsTaggedFields(t, "cgroup", fields, tags)
+}
+
+// ======================================================================
+
+var cg4 = &CGroup{
+	Paths: []string{"testdata/memory/*/*", "testdata/memory/group_2"},
+	Files: []string{"memory.limit_in_bytes"},
+}
+
+func TestCgroupStatistics_4(t *testing.T) {
+	var acc testutil.Accumulator
+
+	err := cg4.Gather(&acc)
+	require.NoError(t, err)
+
+	tags := map[string]string{
 		"path": "testdata/memory/group_1/group_1_1",
 	}
 	fields := map[string]interface{}{
 		"memory.limit_in_bytes": 223372036854771712,
 	}
-	acc.AssertContainsTaggedFields(t, "cgroup:memory", fields, tags)
+	acc.AssertContainsTaggedFields(t, "cgroup", fields, tags)
 
 	tags = map[string]string{
 		"path": "testdata/memory/group_1/group_1_2",
 	}
-	acc.AssertContainsTaggedFields(t, "cgroup:memory", fields, tags)
+	acc.AssertContainsTaggedFields(t, "cgroup", fields, tags)
 
 	tags = map[string]string{
 		"path": "testdata/memory/group_2",
 	}
-	acc.AssertContainsTaggedFields(t, "cgroup:memory", fields, tags)
+	acc.AssertContainsTaggedFields(t, "cgroup", fields, tags)
+}
+
+// ======================================================================
+
+var cg5 = &CGroup{
+	Paths: []string{"testdata/memory/*/group_1_1"},
+	Files: []string{"memory.limit_in_bytes"},
+}
+
+func TestCgroupStatistics_5(t *testing.T) {
+	var acc testutil.Accumulator
+
+	err := cg5.Gather(&acc)
+	require.NoError(t, err)
+
+	tags := map[string]string{
+		"path": "testdata/memory/group_1/group_1_1",
+	}
+	fields := map[string]interface{}{
+		"memory.limit_in_bytes": 223372036854771712,
+	}
+	acc.AssertContainsTaggedFields(t, "cgroup", fields, tags)
+
+	tags = map[string]string{
+		"path": "testdata/memory/group_2/group_1_1",
+	}
+	acc.AssertContainsTaggedFields(t, "cgroup", fields, tags)
+}
+
+// ======================================================================
+
+var cg6 = &CGroup{
+	Paths: []string{"testdata/memory"},
+	Files: []string{"memory.us*", "*/memory.kmem.*"},
+}
+
+func TestCgroupStatistics_6(t *testing.T) {
+	var acc testutil.Accumulator
+
+	err := cg6.Gather(&acc)
+	require.NoError(t, err)
+
+	tags := map[string]string{
+		"path": "testdata/memory",
+	}
+	fields := map[string]interface{}{
+		"memory.usage_in_bytes":      3513667584,
+		"memory.use_hierarchy":       "12-781",
+		"memory.kmem.limit_in_bytes": 9223372036854771712,
+	}
+	acc.AssertContainsTaggedFields(t, "cgroup", fields, tags)
 }
